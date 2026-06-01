@@ -1,5 +1,6 @@
 from fastapi.responses import FileResponse
 from fastapi import FastAPI, HTTPException, Header
+from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 import sqlite3
 import os, time
@@ -10,7 +11,18 @@ from datetime import datetime
 
 app = FastAPI(title="CAMCO")
 
-# --- config ---
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=[
+        "https://camco-gamma.vercel.app",
+        "http://localhost:5173",
+        "http://127.0.0.1:5173"
+    ],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
 DB_PATH = os.path.join(os.path.dirname(__file__), "..", "camco.db")
 API_KEY = os.getenv("API_KEY", "devkey")
 
@@ -21,7 +33,6 @@ def require_api_key(x_api_key: str | None):
     if x_api_key != API_KEY:
         raise HTTPException(status_code=401, detail="Invalid API key")
 
-# --- Pydantic models (so JSON bodies work) ---
 class SignalIn(BaseModel):
     region: str
     provider: str
@@ -41,7 +52,6 @@ class JobIn(BaseModel):
     carbon_weight: float = 0.7
     cost_weight: float = 0.3
 
-# --- bootstrap: tables ---
 with get_db() as conn:
     conn.execute("""
     CREATE TABLE IF NOT EXISTS regions(
@@ -80,9 +90,7 @@ with get_db() as conn:
     )
     """)
 
-# --- helpers ---
 def calc_plan(job: JobIn, r_row: tuple):
-    # r_row: (region, provider, carbon, cpu_price, gpu_price, latency_ms)
     region, _, carbon, cpu_p, gpu_p, latency = r_row
     kwh = job.cpu_hours * 0.5 + job.gpu_hours * 3.0
     co2e_kg = (kwh * carbon) / 1000.0
@@ -93,12 +101,10 @@ def calc_plan(job: JobIn, r_row: tuple):
     score = job.carbon_weight * norm_co2 + job.cost_weight * norm_cost
     return region, co2e_kg, cost_usd, feasible, score
 
-# --- endpoints ---
 @app.get("/health")
 def health():
     return {"ok": True, "service": "camco", "stage": "jobs-ready"}
 
-# FIXED: accept JSON body for signals
 @app.post("/api/signals")
 def upsert_signal(signal: SignalIn, x_api_key: str | None = Header(default=None)):
     require_api_key(x_api_key)
@@ -176,25 +182,32 @@ def submit_job(job: JobIn, x_api_key: str | None = Header(default=None)):
         """, (jid, job.name, job.cpu_hours, job.gpu_hours, job.deadline_minutes,
               job.latency_budget_ms, job.data_region, job.cost_cap_usd,
               job.carbon_weight, job.cost_weight, "queued"))
+
         regions = conn.execute(
             "SELECT region, provider, carbon, cpu_price, gpu_price, latency_ms FROM regions"
         ).fetchall()
+
         if not regions:
             raise HTTPException(status_code=400, detail="No regions configured. Seed /api/signals first.")
+
         best = None
+
         for r in regions:
             region, co2e, cost, feasible, score = calc_plan(job, r)
             conn.execute("""
                 INSERT INTO plans(job_id, region, co2e, cost, feasible, score, chosen)
                 VALUES(?,?,?,?,?,?,0)
             """, (jid, region, co2e, cost, feasible, score))
+
             if feasible and (best is None or score < best[0]):
                 best = (score, region)
+
         if best:
             conn.execute("UPDATE jobs SET status='planned' WHERE id=?", (jid,))
             conn.execute("UPDATE plans SET chosen=1 WHERE job_id=? AND region=?", (jid, best[1]))
         else:
             conn.execute("UPDATE jobs SET status='infeasible' WHERE id=?", (jid,))
+
     return {"job_id": jid}
 
 @app.get("/api/jobs/{job_id}")
@@ -204,11 +217,13 @@ def get_job(job_id: str, x_api_key: str | None = Header(default=None)):
         j = conn.execute("SELECT id, name, status FROM jobs WHERE id=?", (job_id,)).fetchone()
         if not j:
             raise HTTPException(status_code=404, detail="Job not found")
+
         plans = conn.execute("""
             SELECT region, co2e, cost, feasible, score, chosen
             FROM plans WHERE job_id=?
             ORDER BY score ASC
         """, (job_id,)).fetchall()
+
     return {
         "job": {"id": j[0], "name": j[1], "status": j[2]},
         "plans": [
@@ -236,11 +251,14 @@ def override_plan(
             "SELECT 1 FROM plans WHERE job_id=? AND region=? AND feasible=1",
             (job_id, region)
         ).fetchone()
+
         if not row:
             raise HTTPException(status_code=400, detail="Region not feasible or not found for this job")
+
         conn.execute("UPDATE plans SET chosen=0 WHERE job_id=?", (job_id,))
         conn.execute("UPDATE plans SET chosen=1 WHERE job_id=? AND region=?", (job_id, region))
         conn.execute("UPDATE jobs SET status='planned' WHERE id=?", (job_id,))
+
     return {"ok": True, "job_id": job_id, "region": region, "rationale": rationale}
 
 @app.get("/api/reports/{job_id}")
@@ -248,19 +266,25 @@ def generate_report(job_id: str, x_api_key: str | None = Header(default=None)):
     require_api_key(x_api_key)
     with get_db() as conn:
         job = conn.execute("SELECT id, name, status FROM jobs WHERE id=?", (job_id,)).fetchone()
+
         if not job:
             raise HTTPException(status_code=404, detail="Job not found")
+
         plan = conn.execute("""
             SELECT region, co2e, cost, feasible, score, chosen
             FROM plans WHERE job_id=?
             ORDER BY chosen DESC, score ASC
             LIMIT 1
         """, (job_id,)).fetchone()
+
         if not plan:
             raise HTTPException(status_code=400, detail="No plans found for this job")
+
     pdf_path = os.path.join(os.path.dirname(__file__), "..", f"reports_{job_id}.pdf")
+
     c = canvas.Canvas(pdf_path, pagesize=A4)
     c.setTitle("CAMCO Decision Report")
+
     y = 800
     for line in [
         "CAMCO Decision Report",
@@ -275,20 +299,23 @@ def generate_report(job_id: str, x_api_key: str | None = Header(default=None)):
         f"Feasible: {bool(plan[3])}",
         f"Score: {round(plan[4], 6)}",
     ]:
-        c.drawString(72, y, line); y -= 20
-    c.showPage(); c.save()
+        c.drawString(72, y, line)
+        y -= 20
+
+    c.showPage()
+    c.save()
+
     return {"pdf": pdf_path}
 
 @app.get("/api/reports/{job_id}/file")
 def download_report_file(job_id: str, x_api_key: str | None = Header(default=None)):
     require_api_key(x_api_key)
-    # ensure a report exists; if not, generate it first using the existing endpoint logic
+
     pdf_path = os.path.join(os.path.dirname(__file__), "..", f"reports_{job_id}.pdf")
+
     if not os.path.exists(pdf_path):
-        # Reuse the generator to create the file if needed
-        # (call the generator directly so we don’t duplicate logic)
-        # It will raise if job/plans don’t exist.
         generate_report(job_id, x_api_key)
+
     return FileResponse(
         path=pdf_path,
         media_type="application/pdf",
