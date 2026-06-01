@@ -1,5 +1,28 @@
 import { useState, useMemo } from 'react'
-import { apiGet, apiPost } from './api'
+
+const BASE_URL = 'https://camco-backend-7r9p.onrender.com'
+const API_KEY = 'devkey'
+
+async function apiGet(path) {
+  const res = await fetch(`${BASE_URL}${path}`, {
+    headers: { 'X-API-Key': API_KEY }
+  })
+  if (!res.ok) throw new Error(`GET ${path} ${res.status}`)
+  return res.json()
+}
+
+async function apiPost(path, body) {
+  const res = await fetch(`${BASE_URL}${path}`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'X-API-Key': API_KEY
+    },
+    body: JSON.stringify(body)
+  })
+  if (!res.ok) throw new Error(`POST ${path} ${res.status}`)
+  return res.json()
+}
 
 export default function App() {
   const [health, setHealth] = useState(null)
@@ -8,6 +31,11 @@ export default function App() {
   const [plans, setPlans] = useState([])
   const [overrideRegion, setOverrideRegion] = useState('')
   const [error, setError] = useState(null)
+
+  function resetMsgs() {
+    setMessage('')
+    setError(null)
+  }
 
   async function checkHealth() {
     resetMsgs()
@@ -21,23 +49,36 @@ export default function App() {
   }
 
   async function seedRegions() {
-    resetMsgs(); setMessage('Seeding regions...')
+    resetMsgs()
+    setMessage('Seeding regions...')
     try {
       await apiPost('/api/signals', {
-        region: 'us-east-1', provider: 'aws',
-        carbon_gco2_per_kwh: 350, usd_per_cpu_hour: 0.032, usd_per_gpu_hour: 2.1,
+        region: 'us-east-1',
+        provider: 'aws',
+        carbon_gco2_per_kwh: 350,
+        usd_per_cpu_hour: 0.032,
+        usd_per_gpu_hour: 2.1,
         latency_to_data_ms: 90
       })
+
       await apiPost('/api/signals', {
-        region: 'westeurope', provider: 'azure',
-        carbon_gco2_per_kwh: 220, usd_per_cpu_hour: 0.036, usd_per_gpu_hour: 2.3,
+        region: 'westeurope',
+        provider: 'azure',
+        carbon_gco2_per_kwh: 220,
+        usd_per_cpu_hour: 0.036,
+        usd_per_gpu_hour: 2.3,
         latency_to_data_ms: 130
       })
+
       await apiPost('/api/signals', {
-        region: 'us-central1', provider: 'gcp',
-        carbon_gco2_per_kwh: 180, usd_per_cpu_hour: 0.031, usd_per_gpu_hour: 2.0,
+        region: 'us-central1',
+        provider: 'gcp',
+        carbon_gco2_per_kwh: 180,
+        usd_per_cpu_hour: 0.031,
+        usd_per_gpu_hour: 2.0,
         latency_to_data_ms: 110
       })
+
       setMessage('Seeded 3 regions ✅')
     } catch (e) {
       setError(e.message)
@@ -45,7 +86,8 @@ export default function App() {
   }
 
   async function submitSampleJob() {
-    resetMsgs(); setMessage('Submitting job...')
+    resetMsgs()
+    setMessage('Submitting job...')
     try {
       const res = await apiPost('/api/jobs', {
         name: 'daily_etl',
@@ -58,6 +100,7 @@ export default function App() {
         carbon_weight: 0.7,
         cost_weight: 0.3
       })
+
       setJobId(res.job_id)
       setPlans([])
       setOverrideRegion('')
@@ -68,8 +111,13 @@ export default function App() {
   }
 
   async function loadPlans() {
-    if (!jobId) { setError('No job_id yet. Submit a job first.'); return }
-    resetMsgs(); setMessage('Loading plans...')
+    if (!jobId) {
+      setError('No job_id yet. Submit a job first.')
+      return
+    }
+
+    resetMsgs()
+    setMessage('Loading plans...')
     try {
       const data = await apiGet(`/api/jobs/${jobId}`)
       setPlans(data.plans || [])
@@ -85,14 +133,27 @@ export default function App() {
   )
 
   async function doOverride() {
-    if (!jobId) { setError('No job_id.'); return }
-    if (!overrideRegion) { setError('Pick a region to override to.'); return }
-    resetMsgs(); setMessage(`Overriding to ${overrideRegion}...`)
+    if (!jobId) {
+      setError('No job_id.')
+      return
+    }
+
+    if (!overrideRegion) {
+      setError('Pick a region to override to.')
+      return
+    }
+
+    resetMsgs()
+    setMessage(`Overriding to ${overrideRegion}...`)
+
     try {
-      // POST /api/override/{job_id}?region=...
-      await apiPost(`/api/override/${jobId}?region=${encodeURIComponent(overrideRegion)}&rationale=demo-switch`, {})
-      // reload plans to reflect the change
-      await loadPlans()
+      await apiPost(
+        `/api/override/${jobId}?region=${encodeURIComponent(overrideRegion)}&rationale=demo-switch`,
+        {}
+      )
+
+      const data = await apiGet(`/api/jobs/${jobId}`)
+      setPlans(data.plans || [])
       setMessage(`Overridden to ${overrideRegion} ✅`)
     } catch (e) {
       setError(e.message)
@@ -100,25 +161,33 @@ export default function App() {
   }
 
   async function downloadReport() {
-    if (!jobId) { setError('No job_id.'); return }
-    resetMsgs(); setMessage('Generating report...')
+    if (!jobId) {
+      setError('No job_id.')
+      return
+    }
+
+    resetMsgs()
+    setMessage('Generating report...')
+
     try {
-      // First ensure the report exists (optional)
       await apiGet(`/api/reports/${jobId}`)
 
-      // Now fetch the file bytes with header, then trigger a download
-      const res = await fetch(`/api/reports/${jobId}/file`, {
-        headers: { 'X-API-Key': 'devkey' }
+      const res = await fetch(`${BASE_URL}/api/reports/${jobId}/file`, {
+        headers: { 'X-API-Key': API_KEY }
       })
+
       if (!res.ok) throw new Error(`Download failed: ${res.status}`)
+
       const blob = await res.blob()
       const url = URL.createObjectURL(blob)
       const a = document.createElement('a')
+
       a.href = url
       a.download = `reports_${jobId}.pdf`
       document.body.appendChild(a)
       a.click()
       a.remove()
+
       URL.revokeObjectURL(url)
       setMessage('Report downloaded ✅')
     } catch (e) {
@@ -126,13 +195,11 @@ export default function App() {
     }
   }
 
-  function resetMsgs() { setMessage(''); setError(null) }
-
   return (
     <div style={{ fontFamily: 'ui-sans-serif, system-ui', padding: 24, maxWidth: 980 }}>
       <h1>CAMCO – Tiny Frontend</h1>
 
-      <div style={{ display:'flex', gap: 12, flexWrap:'wrap', marginBottom: 16 }}>
+      <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap', marginBottom: 16 }}>
         <button onClick={checkHealth} style={btn}>Check Backend Health</button>
         <button onClick={seedRegions} style={btn}>Seed Regions</button>
         <button onClick={submitSampleJob} style={btn}>Submit Sample Job</button>
@@ -140,18 +207,23 @@ export default function App() {
       </div>
 
       {jobId && (
-        <div style={{ display:'flex', gap:12, alignItems:'center', flexWrap:'wrap', marginBottom: 8 }}>
-          <strong>job_id:</strong> <span>{jobId}</span>
+        <div style={{ display: 'flex', gap: 12, alignItems: 'center', flexWrap: 'wrap', marginBottom: 8 }}>
+          <strong>job_id:</strong>
+          <span>{jobId}</span>
+
           <select value={overrideRegion} onChange={e => setOverrideRegion(e.target.value)} style={select}>
             <option value="">-- pick feasible region --</option>
-            {feasibleOptions.map(r => <option key={r} value={r}>{r}</option>)}
+            {feasibleOptions.map(r => (
+              <option key={r} value={r}>{r}</option>
+            ))}
           </select>
+
           <button onClick={doOverride} style={btn} disabled={!overrideRegion}>Override</button>
           <button onClick={downloadReport} style={btn}>Generate & Download PDF</button>
         </div>
       )}
 
-      {message && <p style={{ color:'#0a0' }}>{message}</p>}
+      {message && <p style={{ color: '#0a0' }}>{message}</p>}
       {error && <pre style={err}>{error}</pre>}
 
       {health && (
@@ -188,8 +260,42 @@ export default function App() {
   )
 }
 
-const btn = { padding:'8px 12px', cursor:'pointer', borderRadius:8, border:'1px solid #ccc', background:'#f5f5f5' }
-const select = { padding:'6px 8px', borderRadius:8, border:'1px solid #ccc', background:'#fff' }
-const pre = { background:'#111', color:'#0f0', padding:12, marginTop:12, borderRadius:8, maxHeight:240, overflow:'auto' }
-const err = { background:'#300', color:'#f77', padding:12, marginTop:12, borderRadius:8 }
-const table = { width:'100%', borderCollapse:'collapse', marginTop:16, border:'1px solid #ddd' }
+const btn = {
+  padding: '8px 12px',
+  cursor: 'pointer',
+  borderRadius: 8,
+  border: '1px solid #ccc',
+  background: '#f5f5f5'
+}
+
+const select = {
+  padding: '6px 8px',
+  borderRadius: 8,
+  border: '1px solid #ccc',
+  background: '#fff'
+}
+
+const pre = {
+  background: '#111',
+  color: '#0f0',
+  padding: 12,
+  marginTop: 12,
+  borderRadius: 8,
+  maxHeight: 240,
+  overflow: 'auto'
+}
+
+const err = {
+  background: '#300',
+  color: '#f77',
+  padding: 12,
+  marginTop: 12,
+  borderRadius: 8
+}
+
+const table = {
+  width: '100%',
+  borderCollapse: 'collapse',
+  marginTop: 16,
+  border: '1px solid #ddd'
+}
